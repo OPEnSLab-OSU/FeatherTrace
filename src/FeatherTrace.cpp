@@ -143,7 +143,9 @@ static _Unwind_Reason_Code trace_func(struct _Unwind_Context *context, void *arg
     }
     else if (myargs->last_ip == ip)
     {
-        if (myargs->strace_len == 1 && p_main_context.saved_lr != _Unwind_GetGR(context, 14))
+        if (myargs->strace_len == 1 
+            && p_main_context.saved_lr != 0
+            && p_main_context.saved_lr != _Unwind_GetGR(context, 14))
         {
             _Unwind_SetGR(context, 14, p_main_context.saved_lr);
             // allocator.singleLenHack++; not sure what this was for?
@@ -194,14 +196,22 @@ static void take_isr_cpu_trace(trace_arg_t* arg)
     }
 }
 
+/** 
+\brief Get Link Register 
+\details Returns the current value of the Link Register (LR). 
+\return LR Register value 
+*/ 
+__attribute__( ( always_inline ) ) static inline uint32_t __get_LR(void) 
+{ 
+  register uint32_t result; 
+
+  __asm volatile ("MOV %0, LR\n" : "=r" (result) ); 
+  return(result); 
+} 
+
 static void take_cpu_trace(trace_arg_t* arg) {
     // set saved_lr to the current link register
-    __asm(".thumb\n"
-        "movs %0, lr\n"
-        : "=r"(p_main_context.saved_lr)
-        : 
-        :
-    );
+    p_main_context.saved_lr = __get_LR();
     // run unwind_backtrace!
     _Unwind_Backtrace(&trace_func, arg);
 }
