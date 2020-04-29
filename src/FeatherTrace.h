@@ -12,20 +12,21 @@
 /**
  * Welcome to FeatherTrace
  * For more information on how to use this library, please see the [README](../README.md).
+ * 
+ * Some notes:
+ * How faults on cortex-M works: https://www.segger.com/downloads/application-notes/AN00016
+ * Normally Cortex-M has a number of failure registers,
+ * however Cortex-M0 has none of these (see https://community.arm.com/developer/ip-products/system/f/embedded-forum/3257/debugging-a-cortex-m0-hard-fault)
+ * we can still use the SCB VECACTIVE bit (https://developer.arm.com/docs/dui0662/a/cortex-m0-peripherals/system-control-block/interrupt-control-and-state-register)
+ * to tell what kind of interrupt we're in, and GCC's unwind-tables feature
+ * to tell where we've come from.
+ * 
+ * FeatherTrace hijacks GCC's unwind.h internal functionality to unwind the stack
+ * not currently in use by the hardfault interrupt. This implementation is mostly
+ * inspired by this: https://github.com/bakerstu/openmrn/blob/0d051659af093e03d883a9ea003773ae58ace62a/src/freertos_drivers/common/cpu_profile.hxx
  */
 
 namespace FeatherTrace {
-    // TODO: encode all NVIC types
-    /** Enumeration for possible causes for fault */
-    enum FaultCause : uint32_t {
-        FAULT_NONE = 0,
-        /** The watchdog was triggered */
-        FAULT_HUNG = 1,
-        /** An invalid instruction was executed, or an invalid memory address was accessed */
-        FAULT_HARDFAULT = 2,
-        /** The heap has crossed into the stack, and the memory is corrupted (see https://learn.adafruit.com/memories-of-an-arduino?view=all) */
-        FAULT_OUTOFMEMORY = 3
-    };
 
     enum class WDTTimeout : uint8_t {
         WDT_8MS = 1,
@@ -41,17 +42,41 @@ namespace FeatherTrace {
         WDT_8S = 11
     };
 
-    enum class FaultType : uint32_t {
-        None = 0,
-        HardFault = 3,
-        WDTEarlyWarning = 18,
-
+    /** Enumeration for possible causes for fault */
+    enum FaultCause : uint32_t {
+        FAULT_NONE = 0,
+        FAULT_UNKNOWN = 1,
+        /** The watchdog was triggered */
+        FAULT_HUNG = 2,
+        /** An invalid instruction was executed, or an invalid memory address was accessed */
+        FAULT_HARDFAULT = 3,
+        /** The heap has crossed into the stack, and the memory is corrupted (see https://learn.adafruit.com/memories-of-an-arduino?view=all) */
+        FAULT_OUTOFMEMORY = 4,
+        /** The user triggered a fault */
+        FAULT_USER = 5
     };
 
     /** Struct containg information about the last fault. */
     struct FaultData {
         /** uin8_t indicating the cause of the fault. */
         FeatherTrace::FaultCause cause;
+        /** Value read from the VECACTIVE field, indicating what interrupt context FeatherTrace was triggered in */
+        uint32_t interrupt_type;
+        /** 
+         * Register dump grabed from the saved exception context, will only be valid if 
+         * interrupt_type != 0. Formatted according to http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.dui0662a/CHDBIBGJ.html,
+         * i.e. as follows:
+         * index 0-12: r0-r12
+         * index 13: stack pointer
+         * index 14: Link register
+         * index 15: Program counter
+         * Registers r0, r1, r2, r3, r12, lr, and PC are grabbed from the saved
+         * execution context on the stack, all others are saved immediatly after 
+         * entering the exception.
+         */
+        uint32_t regs[16];
+        /** Program status register grabbed from the saved exception context, will only be valid if interrupt_type != 0 */
+        uint32_t xpsr;
         /** Whether or not the fault happened while FeatherTrace was recording line information (1 if true, 0 if not) */
         uint8_t is_corrupted;
         /** Number of times FeatherTrace has detected a failure since the device was last programmed */
@@ -127,8 +152,9 @@ namespace FeatherTrace {
 
     /** Private utility function called by the MARK macro */
     void _Mark(const int line, const char* file);
+
+    void Fault(FaultCause cause);
 }
-void HandleFault();
 
 /** 
  * Macro to track the last place where the program was alive.
@@ -160,10 +186,15 @@ extern "C" {
 
     /// This struct definition mimics the internal structures of libgcc in
     /// arm-none-eabi binary. It's not portable and might break in the future.
+    /// NOTE: This must not change! We are exploiting undefined behavior to
+    /// use GCC's internal functionality without permission, and this functionality
+    /// is extremely fragile.
     typedef struct
     {
         unsigned demand_save_flags;
         struct core_regs core;
+        unsigned saved_lr;
+        unsigned saved_xpsr;
     } phase2_vrs;
 
     extern phase2_vrs p_main_context;
