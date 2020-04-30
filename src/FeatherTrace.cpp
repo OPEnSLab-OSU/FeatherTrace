@@ -16,7 +16,7 @@ const void* FeatherTraceFlashPtr = FeatherTraceFlash;
  */
 struct alignas(uint32_t) FaultDataFlashStruct {
     uint32_t value_head = 0xFEFE2A2A;
-    char marker[32] = "FeatherTrace Data Here! Versn:";
+    char marker[24] = "FeatherTrace Data Here:";
     uint32_t version = 0;
     char marker1[8] = "Caused:";
     uint32_t cause;
@@ -137,14 +137,6 @@ _Unwind_Reason_Code trace_func(struct _Unwind_Context *context, void *arg)
 {
     trace_arg_t* myargs = (trace_arg_t*)arg;
     unsigned ip = _Unwind_GetIP(context);
-    // for some reason GCC keeps unwinding past the reset handler sometimes,
-    // which causes yet another hardfault
-    // this addresses that issue by exiting upon encountering it.
-    // Add one because GetRegionStart is one off for some reason
-    int (*ptr)() = (int (*)())(_Unwind_GetRegionStart(context) + 1);
-    if (ptr == main) {
-        return _URC_END_OF_STACK;
-    }
     // ignore the first entry to prevent doubling up
     if (myargs->strace_len == 0)
     {
@@ -172,6 +164,14 @@ _Unwind_Reason_Code trace_func(struct _Unwind_Context *context, void *arg)
     }
     myargs->stacktrace[myargs->strace_len++] = ip;
     myargs->last_ip = ip;
+    // for some reason GCC keeps unwinding past the reset handler sometimes,
+    // which causes yet another hardfault
+    // this addresses that issue by exiting upon encountering it.
+    // Add one because GetRegionStart is one off for some reason
+    int (*ptr)() = (int (*)())(_Unwind_GetRegionStart(context) + 1);
+    if (ptr == main) {
+        return _URC_END_OF_STACK;
+    }
     // ip = (void *)_Unwind_GetRegionStart(context);
     // stacktrace[strace_len++] = ip;
     return _URC_NO_REASON;

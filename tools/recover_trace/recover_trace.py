@@ -11,6 +11,7 @@
 #   Python 3.x - Available on windows, linux and mac. See https://realpython.com/installing-python/
 #   click - Install with 'sudo pip3 install click' (omit sudo on windows)
 #   pyserial - Install with 'sudo pip3 install pyserial' (omit sudo on windows)
+#   pyocd - Install with 'sudo pip3 install pyocd' (omit sudo on windows)
 #   bossac - You will need to install BOSSA (https://www.shumatech.com/web/products/bossa), and locate
 #       bossac from the installation (In windows: C:\Program Files (x86)\BOSSA\bossac.exe). From there, you 
 #       can either copy the binary into the same directory as this script, or add the BOSSA folder to your path.
@@ -23,9 +24,12 @@ import enum
 from serial.tools import list_ports
 import mmap
 import struct
+import array
 from collections import namedtuple
 import os
 import shutil
+from elftools.elf.elffile import ELFFile
+from pyocd.debug.elf.decoder import DwarfAddressDecoder
 
 # These values are specific to the Adafruit Feather M0 USB configuration
 PID_SKETCH = (0x800b, 0x801B)
@@ -34,9 +38,9 @@ VID = 0x239a
 
 # These values indicate where and what FeatherTrace trace data is stored in flash
 FEATHERTRACE_HEAD = 0xFEFE2A2A
-FEATHERTRACE_STRING = b'FeatherTrace Data Here! Versn:\0'
+FEATHERTRACE_STRING = b'FeatherTrace Data Here:\0'
 # This must be changed to reflect changes in the FeatherTraceFlash struct
-FEATHERTRACE_STRUCT_FMT = '<I32sI8sI8sI8s32I8s16I1I8sI8sI8si8s64s4s'
+FEATHERTRACE_STRUCT_FMT = '< I 24s I 8s I 8s I 8s 32I 8s 16I I 8s I 8s I 8s i 8s 64s 4s'
 FEATHERTRACE_STRUCT_FIELDS = 'value_head marker version marker1 cause marker2 interrupt_type marker3 stacktrace marker4 regs xpsr marker5 is_corrupted marker6 failnum marker7 line marker8 file marker9'
 FEATHERTRACE_STRUCT_NAMEDTUPLE = namedtuple('FeatherTraceData', FEATHERTRACE_STRUCT_FIELDS)
 
@@ -79,7 +83,28 @@ def download_board_flash(port, bossac, tmpfilepath):
 def get_fault_data(byte_data):
     # todo: fix struct unpacking to collate arrays
     unpacked = struct.unpack(FEATHERTRACE_STRUCT_FMT, byte_data)
-    return FEATHERTRACE_STRUCT_NAMEDTUPLE._make(unpacked)
+    # group together the stacktrace and regs arrays
+    stacktrace = unpacked[8:40]
+    regs = unpacked[41:57]
+    # recreate the tuple with these new arrays
+    true_unpacked = unpacked[:8] + (stacktrace, unpacked[40], regs) + unpacked[57:]
+    return FEATHERTRACE_STRUCT_NAMEDTUPLE._make(true_unpacked)
+
+def print_stack_trace(elf_path, addresses):
+    try:
+        with open(elf_path, 'rb') as e:
+            elffile = ELFFile(e)
+            decoder = DwarfAddressDecoder(elffile)
+            for addr in addresses:
+                # for some reason the stack trace is off by one?
+                # I correct it here instead of inside FeatherTrace because
+                # the addresses are correct during the GDB session
+                # when they are being saved. Not sure why.
+                function = decoder.get_function_for_address(addr - 1)
+                line = decoder.get_line_for_address(addr - 1)
+                click.echo(f'\t\t{ format(addr, "#010x") }: { function.name.decode() }() at { line.dirname.decode() }/{ line.filename.decode() }:{ line.line }')
+    except Exception as ex:
+        click.echo(f'Error while decoding stacktrace: {ex}')
 
 # Click setup and commands:
 @click.group()
@@ -151,17 +176,20 @@ def reset_board(attempt_count, attempt_wait, force, port):
 @click.option('--force', '-f', is_flag=True,
     help='Disable all checks that the COM port is valid (not recommended)') 
 @click.option('--bossac-path', '-u', type=click.Path(dir_okay=False), default=None,
-              help='Location of the BOSSAC uploader tool, see installation instructions for more information.')
+    help='Location of the BOSSAC uploader tool, see installation instructions for more information. If this option is not specified BOSSAC must be in your PATH.')
+@click.option('--elf-path', '-e', type=click.Path(dir_okay=False), default=None,
+    help='Location of the ELF file for addr2line to interpret debug symbols from. Must be from the same build as is running on the Feather M0 for stacktrace decoding to work correctly.')
 @click.option('--bin-path', '-b', type=click.Path(dir_okay=False), default='./flash.bin',
     help='Location to place temporarily place the flash data')
 @click.argument('port')
-def recover(force, bossac_path, bin_path, port):
+def recover(force, bossac_path, elf_path, bin_path, port):
     """
     Uses BOSSAC to extract FeatherTrace data from the flash memory of a Feather M0
     in bootloader mode. The first argument specifies the COM port to extract from.
 
     Note that --bossac-path must point to a valid BOSSAC executable, see the installation
-    instructions for more infomation on how to install BOSSA.
+    instructions for more infomation on how to install BOSSA. Additionally, a valid ELF (-e)
+    must be specified to enable stack trace decoding.
     """
     # check that BOSSAC exists
     if bossac_path == None:
@@ -200,13 +228,33 @@ def recover(force, bossac_path, bin_path, port):
             # unpack, and check that the result makes sense
             data = get_fault_data(fmap[idx:(idx + struct.calcsize(FEATHERTRACE_STRUCT_FMT))])
             if data.value_head == FEATHERTRACE_HEAD and data.marker == FEATHERTRACE_STRING:
-                click.echo(f'Found trace data!')
-                # TODO: this
-                # click.echo(f'\tFault: { FaultCause(data.cause) }')
-                # click.echo(f'\tFaulted during recording: { "Yes" if data.is_corrupted > 0 else "No" }')
-                # click.echo(f'\tLine: { data.line }')
-                # click.echo(f'\tFile: { data.file.split(bytes.fromhex("00"), 1)[0] }')
-                # click.echo(f'\tFailures since upload: { data.failnum }')
+                click.echo('Found trace data!')
+                click.echo(f'\tFault: { FaultCause(data.cause) }')
+                click.echo(f'\tFaulted during recording: { "Yes" if data.is_corrupted > 0 else "No" }')
+                click.echo(f'\tLast Marked Line: { data.line }')
+                click.echo(f'\tLast Marked File: { data.file.split(bytes.fromhex("00"), 1)[0] }')
+                click.echo(f'\tInterrupt type: { data.interrupt_type }')
+                click.echo(f'\tFailures since upload: { data.failnum }')
+                # if the interrupt was asynchrounous, read the saved registers
+                if data.interrupt_type != 0:
+                    hexfmt = '{:#010x}'
+                    click.echo('\tRegisters:')
+                    # print the first 13 registers
+                    first_regs = [ 'R{:} {:#010x}'.format(i, regval) for i,regval in enumerate(data.regs[:13]) ]
+                    fmted_regs_line1 = ', '.join(first_regs[:7])
+                    click.echo(f'\t\t{ fmted_regs_line1 }\t')
+                    fmted_regs_line2 = ', '.join(first_regs[7:])
+                    click.echo(f'\t\t{ fmted_regs_line2 }\t')
+                    # print the special ones
+                    click.echo(f'\t\tSP: { hexfmt.format(data.regs[13]) }\tLR: { hexfmt.format(data.regs[14]) }\tPC: { hexfmt.format(data.regs[15]) }\txPSR: { hexfmt.format(data.xpsr) }')
+                    # print decoded stacktrace if all tools needed are present
+                    if elf_path != None and os.path.isfile(elf_path):
+                        click.echo('\tDecoded Stacktrace (may take a moment): ')
+                        print_stack_trace(elf_path, [ addr for addr in data.stacktrace if addr != 0 ])
+                    # else print the normal stacktrace
+                    else:
+                        fmted_trace = ', '.join([ hexfmt.format(addr) for addr in data.stacktrace if addr != 0 ])
+                        click.echo(f'\tStacktrace: { fmted_trace }')
                 exit_status = 0
                 break
             # else keep going
