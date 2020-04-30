@@ -176,29 +176,29 @@ namespace FeatherTrace {
  */
 #define MARK { constexpr const char* const filename = __SHORT_FILE__; FeatherTrace::_Mark(__LINE__,  filename); }
 
+/// This struct definition mimics the internal structures of libgcc in
+/// arm-none-eabi binary. It's not portable and might break in the future.
+struct core_regs
+{
+    unsigned r[16];
+};
+
+/// This struct definition mimics the internal structures of libgcc in
+/// arm-none-eabi binary. It's not portable and might break in the future.
+/// NOTE: This must not change! We are exploiting undefined behavior to
+/// use GCC's internal functionality without permission, and this functionality
+/// is extremely fragile.
+typedef struct
+{
+    unsigned demand_save_flags;
+    struct core_regs core;
+    // unsigned saved_lr;
+    // unsigned saved_xpsr;
+} phase2_vrs;
+
+extern phase2_vrs p_main_context;
+
 extern "C" {
-    /// This struct definition mimics the internal structures of libgcc in
-    /// arm-none-eabi binary. It's not portable and might break in the future.
-    struct core_regs
-    {
-        unsigned r[16];
-    };
-
-    /// This struct definition mimics the internal structures of libgcc in
-    /// arm-none-eabi binary. It's not portable and might break in the future.
-    /// NOTE: This must not change! We are exploiting undefined behavior to
-    /// use GCC's internal functionality without permission, and this functionality
-    /// is extremely fragile.
-    typedef struct
-    {
-        unsigned demand_save_flags;
-        struct core_regs core;
-        unsigned saved_lr;
-        unsigned saved_xpsr;
-    } phase2_vrs;
-
-    extern phase2_vrs p_main_context;
-    
     volatile void __attribute__((__noinline__)) p_load_monitor_interrupt_handler(
         volatile unsigned *exception_args, unsigned exception_return_code);
 

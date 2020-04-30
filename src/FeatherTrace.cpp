@@ -1,6 +1,7 @@
 #include "FeatherTrace.h"
-#include <unwind.h>
-
+extern "C" {
+    #include <unwind.h>
+}
 /** Allocate 512 bytes in flash for our crash logs */
 alignas(256) _Pragma("location=\"FLASH\"") static const uint8_t FeatherTraceFlash[512] = { 0 };
 const void* FeatherTraceFlashPtr = FeatherTraceFlash;
@@ -63,11 +64,12 @@ static volatile int last_line = 0;
 static volatile const char* last_file = "";
 /** Global variable to store function pointer we would like to call during the watchdog, if any */
 static volatile void(*callback_ptr)() = nullptr;
-extern "C" {
-    /// We store what we know about the external context at interrupt entry in this
-    /// structure.
-    phase2_vrs p_main_context;
-}
+/// We store what we know about the external context at interrupt entry in this
+/// structure.
+phase2_vrs p_main_context;
+
+static unsigned saved_lr;
+static unsigned saved_xpsr;
 
 #ifdef __arm__
 // should use uinstd.h to define sbrk but Due causes a conflict
@@ -90,6 +92,8 @@ static int freeMemory() {
 extern "C" {
     _Unwind_Reason_Code __gnu_Unwind_Backtrace(
         _Unwind_Trace_Fn trace, void *trace_argument, phase2_vrs *entry_vrs);
+
+    _Unwind_Reason_Code _Unwind_Backtrace(_Unwind_Trace_Fn trace, void * trace_argument);
 }
 
 // Derived from VECTACTIVE in
@@ -121,19 +125,27 @@ static void fill_phase2_vrs(volatile unsigned *fault_args)
     // This has been removed for ARMv6
     p_main_context.core.r[14] = fault_args[6]; // + 2; // Set link register to the previous program counter
     p_main_context.core.r[15] = fault_args[6]; // Set program counter as well
-    p_main_context.saved_lr = fault_args[5]; // save the link register for later
+    saved_lr = fault_args[5]; // save the link register for later
     // also save xPSR so we can read it later
-    p_main_context.saved_xpsr = fault_args[7];
+    saved_xpsr = fault_args[7];
     // set the stack pointer to the inactive stack minus values pushed entering the exception
     p_main_context.core.r[13] = (unsigned)(fault_args + 8); 
 }
 
 /// Callback from the unwind backtrace function.
-static _Unwind_Reason_Code trace_func(struct _Unwind_Context *context, void *arg)
+_Unwind_Reason_Code trace_func(struct _Unwind_Context *context, void *arg)
 {
     trace_arg_t* myargs = (trace_arg_t*)arg;
-    unsigned ip;
-    ip = _Unwind_GetIP(context);
+    unsigned ip = _Unwind_GetIP(context);
+    // for some reason GCC keeps unwinding past the reset handler sometimes,
+    // which causes yet another hardfault
+    // this addresses that issue by exiting upon encountering it.
+    // Add one because GetRegionStart is one off for some reason
+    int (*ptr)() = (int (*)())(_Unwind_GetRegionStart(context) + 1);
+    if (ptr == main) {
+        return _URC_END_OF_STACK;
+    }
+    // ignore the first entry to prevent doubling up
     if (myargs->strace_len == 0)
     {
         // stacktrace[strace_len++] = ip;
@@ -144,10 +156,10 @@ static _Unwind_Reason_Code trace_func(struct _Unwind_Context *context, void *arg
     else if (myargs->last_ip == ip)
     {
         if (myargs->strace_len == 1 
-            && p_main_context.saved_lr != 0
-            && p_main_context.saved_lr != _Unwind_GetGR(context, 14))
+            && saved_lr != 0
+            && saved_lr != _Unwind_GetGR(context, 14))
         {
-            _Unwind_SetGR(context, 14, p_main_context.saved_lr);
+            _Unwind_SetGR(context, 14, saved_lr);
             // allocator.singleLenHack++; not sure what this was for?
             return _URC_NO_REASON;
         }
@@ -165,10 +177,12 @@ static _Unwind_Reason_Code trace_func(struct _Unwind_Context *context, void *arg
     return _URC_NO_REASON;
 }
 
+
 /// Called from the interrupt handler to take a CPU trace for the current
 /// exception.
 static void take_isr_cpu_trace(trace_arg_t* arg)
 {
+    p_main_context.demand_save_flags = 0;
     // perform the stack trace!
     phase2_vrs first_context = p_main_context;
     __gnu_Unwind_Backtrace(&trace_func, arg, &first_context);
@@ -184,36 +198,16 @@ static void take_isr_cpu_trace(trace_arg_t* arg)
     if (arg->strace_len == 1)
     {
         // try the link register instead of the program counter
-        p_main_context.core.r[14] = p_main_context.saved_lr;
-        p_main_context.core.r[15] = p_main_context.saved_lr;
+        p_main_context.core.r[14] = saved_lr;
+        p_main_context.core.r[15] = saved_lr;
         arg->last_ip = 0;
         __gnu_Unwind_Backtrace(&trace_func, arg, &p_main_context);
     }
     if (arg->strace_len == 1)
     {
-        arg->stacktrace[1] = p_main_context.saved_lr;
+        arg->stacktrace[1] = saved_lr;
         arg->strace_len++;
     }
-}
-
-/** 
-\brief Get Link Register 
-\details Returns the current value of the Link Register (LR). 
-\return LR Register value 
-*/ 
-__attribute__( ( always_inline ) ) static inline uint32_t __get_LR(void) 
-{ 
-  register uint32_t result; 
-
-  __asm volatile ("MOV %0, LR\n" : "=r" (result) ); 
-  return(result); 
-} 
-
-static void take_cpu_trace(trace_arg_t* arg) {
-    // set saved_lr to the current link register
-    p_main_context.saved_lr = __get_LR();
-    // run unwind_backtrace!
-    _Unwind_Backtrace(&trace_func, arg);
 }
 
 static void WDTReset() {
@@ -280,6 +274,8 @@ void FeatherTrace::Fault(FeatherTrace::FaultCause cause) {
         }
         // else there's been a timeout, so fault!
     }
+    // disable the watchdog so we aren't interrupted
+    FeatherTrace::StopWDT();
     // Create a fault data object, and populate it with all the saved data
     FaultDataFlash_t trace = { {} };
     // save the interrupt type
@@ -289,7 +285,8 @@ void FeatherTrace::Fault(FeatherTrace::FaultCause cause) {
     if (last_intr == SCBFaultType::SCB_NONE) {
         // take a cpu trace!
         trace_arg_t arg = {};
-        take_cpu_trace(&arg);
+        // run unwind_backtrace!
+        _Unwind_Backtrace(&trace_func, &arg);
         // write the results to our fault data
         for (size_t i = 0; i < MAX_STRACE; i++)
             trace.data.stacktrace[i] = arg.stacktrace[i];
@@ -300,9 +297,9 @@ void FeatherTrace::Fault(FeatherTrace::FaultCause cause) {
         for (size_t i = 0; i < 16; i++)
             trace.data.regs[i] = p_main_context.core.r[i];
         // also make sure the link register is set correctly, since we have to hack around it earlier
-        trace.data.regs[14] = p_main_context.saved_lr;
+        trace.data.regs[14] = saved_lr;
         // save xPSR
-        trace.data.xpsr = p_main_context.saved_xpsr;
+        trace.data.xpsr = saved_xpsr;
         // take a backtrace!
         trace_arg_t arg = {};
         take_isr_cpu_trace(&arg);
