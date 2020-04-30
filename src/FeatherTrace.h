@@ -7,7 +7,7 @@
 #include <sam.h>
 #include "ShortFile.h"
 
-#define MAX_STRACE 20
+#define MAX_STRACE 32
 
 /**
  * Welcome to FeatherTrace
