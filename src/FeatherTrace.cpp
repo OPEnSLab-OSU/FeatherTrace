@@ -64,12 +64,12 @@ static volatile int last_line = 0;
 static volatile const char* last_file = "";
 /** Global variable to store function pointer we would like to call during the watchdog, if any */
 static volatile void(*callback_ptr)() = nullptr;
-/// We store what we know about the external context at interrupt entry in this
-/// structure.
-phase2_vrs p_main_context;
-
+/** Global varible to store the Link Register (lr) during stack decoding. */
 static unsigned saved_lr;
+/** Global varible to store the program status register (xpsr) during stack decoding */
 static unsigned saved_xpsr;
+/* See FeatherTrace.h */
+phase2_vrs p_main_context;
 
 #ifdef __arm__
 // should use uinstd.h to define sbrk but Due causes a conflict
@@ -96,17 +96,23 @@ extern "C" {
     _Unwind_Reason_Code _Unwind_Backtrace(_Unwind_Trace_Fn trace, void * trace_argument);
 }
 
-// Derived from VECTACTIVE in
-// https://developer.arm.com/docs/dui0662/a/cortex-m0-peripherals/system-control-block/interrupt-control-and-state-register
+/** Derived from VECTACTIVE in https://developer.arm.com/docs/dui0662/a/cortex-m0-peripherals/system-control-block/interrupt-control-and-state-register */
 enum SCBFaultType : uint32_t {
     SCB_NONE = 0,
     SCB_HARDFAULT = 3,
     SCB_WDTEW = 18,
 };
 
-/// Takes registers from the core state and the saved exception context and
-/// fills in the structure necessary for the LIBGCC unwinder.
-/// @param fault_args stack pointer we would like to unwind
+/**
+ * Takes registers from the core state and the saved exception context and
+ * fills in the structure necessary for the LIBGCC unwinder. Also fills
+ * saved_lr and saved_xpsr.
+ * 
+ * This function was derived from the OpenMRN implementation here:
+ * https://github.com/bakerstu/openmrn/blob/0d051659af093e03d883a9ea003773ae58ace62a/src/freertos_drivers/common/cpu_profile.hxx#L183-L202
+ * 
+ * @param fault_args stack pointer we would like to unwind
+ */
 static void fill_phase2_vrs(volatile unsigned *fault_args)
 {
     // see https://static.docs.arm.com/ddi0419/d/DDI0419D_armv6m_arm.pdf B.1.5.6 for
@@ -132,7 +138,15 @@ static void fill_phase2_vrs(volatile unsigned *fault_args)
     p_main_context.core.r[13] = (unsigned)(fault_args + 8); 
 }
 
-/// Callback from the unwind backtrace function.
+/**
+ * Callback for _Unwind_Backtrace, stores the information from the
+ * backtrace into arg for processing later.
+ * 
+ * This function is derived from the OpenMRN implementatio here:
+ * https://github.com/bakerstu/openmrn/blob/0d051659af093e03d883a9ea003773ae58ace62a/src/freertos_drivers/common/cpu_profile.hxx#L212-L244
+ * Changes were made as FeatherTrace only needs to support a single
+ * stacktrace per boot.
+ */
 _Unwind_Reason_Code trace_func(struct _Unwind_Context *context, void *arg)
 {
     trace_arg_t* myargs = (trace_arg_t*)arg;
@@ -178,8 +192,14 @@ _Unwind_Reason_Code trace_func(struct _Unwind_Context *context, void *arg)
 }
 
 
-/// Called from the interrupt handler to take a CPU trace for the current
-/// exception.
+/**
+ * Use _Unwind_Backtrace as if we are in an ISR
+ * context, meaning we've saved registers to
+ * p_main_context and we'd like _Unwind_Backtrace
+ * to look at a different stack than the one we're
+ * using now
+ * @param arg[out] Pointer to a object used to store the results of the trace.
+ */
 static void take_isr_cpu_trace(trace_arg_t* arg)
 {
     p_main_context.demand_save_flags = 0;
@@ -215,6 +235,11 @@ static void WDTReset() {
     WDT->CLEAR.reg = WDT_CLEAR_CLEAR_KEY;
 }
 
+/**
+ * Write trace data to FeatherTraceFlash, a non-volatile memory storage area.
+ * This function is translated from https://github.com/cmaglie/FlashStorage.
+ * @param trace Trace to save to flash.
+ */
 static void write_to_flash(const FaultDataFlash_t& trace) {
     volatile uint32_t* flash_u32 = (volatile uint32_t*)FeatherTraceFlashPtr;
     volatile uint8_t* const flash_u8 = (volatile uint8_t*)FeatherTraceFlashPtr;
@@ -248,15 +273,8 @@ static void write_to_flash(const FaultDataFlash_t& trace) {
     }
 }
 
-/**
- * @brief Generic fault handler for FeatherTrace
- * 
- * TODO: fix comment
- * 
- * @param cause The reason HandleFault was called (should not be FAULT_NONE).
- * @return This function does not return.
- */
-void FeatherTrace::Fault(FeatherTrace::FaultCause cause) {
+/* See FeatherTrace.h */
+[[noreturn]] void FeatherTrace::Fault(FeatherTrace::FaultCause cause) {
     // Check if the the interrupt was a WDT EW
     // Read SCB/ICSR, detailed here:
     // https://developer.arm.com/docs/dui0662/a/cortex-m0-peripherals/system-control-block/interrupt-control-and-state-register
@@ -346,6 +364,7 @@ void FeatherTrace::Fault(FeatherTrace::FaultCause cause) {
 }
 
 extern "C" {
+    /* See FeatherTrace.h */
     volatile void __attribute__((__noinline__)) p_load_monitor_interrupt_handler(
         volatile unsigned *exception_args, unsigned exception_return_code)
     {

@@ -12,22 +12,11 @@
 /**
  * Welcome to FeatherTrace
  * For more information on how to use this library, please see the [README](../README.md).
- * 
- * Some notes:
- * How faults on cortex-M works: https://www.segger.com/downloads/application-notes/AN00016
- * Normally Cortex-M has a number of failure registers,
- * however Cortex-M0 has none of these (see https://community.arm.com/developer/ip-products/system/f/embedded-forum/3257/debugging-a-cortex-m0-hard-fault)
- * we can still use the SCB VECACTIVE bit (https://developer.arm.com/docs/dui0662/a/cortex-m0-peripherals/system-control-block/interrupt-control-and-state-register)
- * to tell what kind of interrupt we're in, and GCC's unwind-tables feature
- * to tell where we've come from.
- * 
- * FeatherTrace hijacks GCC's unwind.h internal functionality to unwind the stack
- * not currently in use by the hardfault interrupt. This implementation is mostly
- * inspired by this: https://github.com/bakerstu/openmrn/blob/0d051659af093e03d883a9ea003773ae58ace62a/src/freertos_drivers/common/cpu_profile.hxx
  */
 
 namespace FeatherTrace {
 
+`   /** Enumatation of the possible watchdog timeouts */
     enum class WDTTimeout : uint8_t {
         WDT_8MS = 1,
         WDT_15MS = 2,
@@ -58,9 +47,13 @@ namespace FeatherTrace {
 
     /** Struct containg information about the last fault. */
     struct FaultData {
-        /** uin8_t indicating the cause of the fault. */
+        /** The cause of the fault. */
         FeatherTrace::FaultCause cause;
-        /** Value read from the VECACTIVE field, indicating what interrupt context FeatherTrace was triggered in */
+        /** 
+         * Value read from the VECACTIVE field, indicating what interrupt context FeatherTrace was triggered in.
+         * See https://developer.arm.com/docs/dui0662/a/cortex-m0-peripherals/system-control-block/interrupt-control-and-state-register
+         * for more information about this number.
+         */
         uint32_t interrupt_type;
         /** 
          * Register dump grabed from the saved exception context, will only be valid if 
@@ -71,13 +64,13 @@ namespace FeatherTrace {
          * index 14: Link register
          * index 15: Program counter
          * Registers r0, r1, r2, r3, r12, lr, and PC are grabbed from the saved
-         * execution context on the stack, all others are saved immediatly after 
+         * execution context on the stack, all others are saved immediately after 
          * entering the exception.
          */
         uint32_t regs[16];
         /** Program status register grabbed from the saved exception context, will only be valid if interrupt_type != 0 */
         uint32_t xpsr;
-        /** Whether or not the fault happened while FeatherTrace was recording line information (1 if true, 0 if not) */
+        /** Whether or not the fault happened while FeatherTrace was recording line information (1 if so, 0 if not) */
         uint8_t is_corrupted;
         /** Number of times FeatherTrace has detected a failure since the device was last programmed */
         uint32_t failnum;
@@ -85,7 +78,7 @@ namespace FeatherTrace {
         int32_t line;
         /** The filename where this line was taken from, may be corrupted if is_corrupted is 1 */
         char file[64];
-        /** A list of addresses forming a backtrace to where the fault happened */
+        /** A list of addresses forming a backtrace to where the fault happened, starting from the most nested address and ending with a zero. */
         uint32_t stacktrace[MAX_STRACE];
     };
 
@@ -147,13 +140,28 @@ namespace FeatherTrace {
      * Returns a FeatherTrace::FaultData struct containing information
      * about the last fault to occur. If no fault has occured, this
      * function will return a struct of all zeros.
+     * @return Fault information from the last fault, or zero.
      */
     FaultData GetFault();
 
+    /**
+     * Immediately triggers a fault with a user-specified cause.
+     * This function is a manual method for triggering FeatherTrace,
+     * and can be used as a last-resort panic handler in code. When
+     * called, this function will save a stack trace, last MARKed
+     * line/file, and the cause parameter. This function will not
+     * save registers as that is very difficult to do outside of
+     * an interrupt contect.
+     * 
+     * @note when calling this function in your code you should 
+     * use FaultCause::FAULT_USER.
+     * @note Do not call this function in an interrupt context.
+     * @param cause Cause of the fault for FeatherTrace to save.
+     */
+    [[noreturn]] void Fault(FaultCause cause);
+
     /** Private utility function called by the MARK macro */
     void _Mark(const int line, const char* file);
-
-    void Fault(FaultCause cause);
 }
 
 /** 
@@ -183,11 +191,14 @@ struct core_regs
     unsigned r[16];
 };
 
-/// This struct definition mimics the internal structures of libgcc in
-/// arm-none-eabi binary. It's not portable and might break in the future.
-/// NOTE: This must not change! We are exploiting undefined behavior to
-/// use GCC's internal functionality without permission, and this functionality
-/// is extremely fragile.
+
+/**
+ * This struct definition mimics the internal structures of libgcc in
+ * arm-none-eabi binary. It's not portable and might break in the future.
+ * @note This must not change! We are exploiting undefined behavior to
+ * use GCC's internal functionality without permission. This functionality
+ * is extremely fragile, so please don't touch.
+ */
 typedef struct
 {
     unsigned demand_save_flags;
@@ -196,12 +207,32 @@ typedef struct
     // unsigned saved_xpsr;
 } phase2_vrs;
 
+/** Global instance of saved CPU registers to be used by our interupt handler */
 extern phase2_vrs p_main_context;
 
 extern "C" {
+    /**
+     * Given a stack pointer, save the registers popped to it during the exception
+     * into p_main_context. This allows us to have a copy of the CPU state before
+     * the exception was triggered, and we can unwind the stack from there.
+     * 
+     * @note Do not call this function outside of p_handler!
+     * @param exception_args The stack pointer to unwind (MSP or PSP)
+     * @param exception_return_code unused.
+     */
     volatile void __attribute__((__noinline__)) p_load_monitor_interrupt_handler(
         volatile unsigned *exception_args, unsigned exception_return_code);
 
+    /**
+     * Interrupt handler in Thumbv2 ASM. Saves r4-r14 to p_main_context.core.r[4:14]
+     * then calls p_load_monitor_interrupt_handler with the stack pointer not currently
+     * in use.
+     * 
+     * @note This function must be called through an exception. Do not call it directly!
+     * This function was translated from the OpenMRN implementation here:
+     * https://github.com/bakerstu/openmrn/blob/0d051659af093e03d883a9ea003773ae58ace62a/src/freertos_drivers/common/cpu_profile.hxx#L334-L362     * Changes were made for Thumb compatibility, but the functionality
+     * is the same.
+     */
     static void __attribute__((__naked__)) p_handler()
     {
         __asm volatile(".thumb\n"
@@ -253,9 +284,11 @@ extern "C" {
     }
 }
 
+/** Set p_handler to trigger on a specified interrupt */
 #define FEATHERTRACE_BIND_HANDLER(_name) extern "C" {\
     void _name() __attribute__ ((alias("p_handler"))); }
 
+/** Bind p_handler to HardFault and WDT, which is the default for FeatherTrace functionality */
 #define FEATHERTRACE_BIND_ALL() \
     FEATHERTRACE_BIND_HANDLER(HardFault_Handler) \
     FEATHERTRACE_BIND_HANDLER(WDT_Handler)

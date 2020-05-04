@@ -247,14 +247,15 @@ def recover(force, bossac_path, elf_path, bin_path, port):
                     click.echo(f'\t\t{ fmted_regs_line2 }\t')
                     # print the special ones
                     click.echo(f'\t\tSP: { hexfmt.format(data.regs[13]) }\tLR: { hexfmt.format(data.regs[14]) }\tPC: { hexfmt.format(data.regs[15]) }\txPSR: { hexfmt.format(data.xpsr) }')
-                    # print decoded stacktrace if all tools needed are present
-                    if elf_path != None and os.path.isfile(elf_path):
-                        click.echo('\tDecoded Stacktrace (may take a moment): ')
-                        print_stack_trace(elf_path, [ addr for addr in data.stacktrace if addr != 0 ])
-                    # else print the normal stacktrace
-                    else:
-                        fmted_trace = ', '.join([ hexfmt.format(addr) for addr in data.stacktrace if addr != 0 ])
-                        click.echo(f'\tStacktrace: { fmted_trace }')
+                # print decoded stacktrace if all tools needed are present
+                if elf_path != None and os.path.isfile(elf_path):
+                    click.echo('\tDecoded Stacktrace (may take a moment): ')
+                    print_stack_trace(elf_path, [ addr for addr in data.stacktrace if addr != 0 ])
+                # else print the normal stacktrace
+                else:
+                    fmted_trace = ', '.join([ hexfmt.format(addr) for addr in data.stacktrace if addr != 0 ])
+                    click.echo(f'\tStacktrace: { fmted_trace }')
+                # exit success
                 exit_status = 0
                 break
             # else keep going
@@ -262,6 +263,8 @@ def recover(force, bossac_path, elf_path, bin_path, port):
     # delete the temporary file
     os.remove(bin_path)
     exit(exit_status)
+
+# TODO: "decode" command to decode stacktrace addresses
 
 if __name__ == '__main__':
     recover_fault()
