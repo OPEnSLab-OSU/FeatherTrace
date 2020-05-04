@@ -16,7 +16,7 @@
 
 namespace FeatherTrace {
 
-`   /** Enumatation of the possible watchdog timeouts */
+   /** Enumatation of the possible watchdog timeouts */
     enum class WDTTimeout : uint8_t {
         WDT_8MS = 1,
         WDT_15MS = 2,

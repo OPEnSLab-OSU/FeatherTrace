@@ -234,7 +234,14 @@ def recover(force, bossac_path, elf_path, bin_path, port):
                 click.echo(f'\tLast Marked Line: { data.line }')
                 click.echo(f'\tLast Marked File: { data.file.split(bytes.fromhex("00"), 1)[0] }')
                 click.echo(f'\tInterrupt type: { data.interrupt_type }')
-                click.echo(f'\tFailures since upload: { data.failnum }')
+                # print decoded stacktrace if all tools needed are present
+                if elf_path != None and os.path.isfile(elf_path):
+                    click.echo('\tDecoded Stacktrace (may take a moment): ')
+                    print_stack_trace(elf_path, [ addr for addr in data.stacktrace if addr != 0 ])
+                # else print the normal stacktrace
+                else:
+                    fmted_trace = ', '.join([ hexfmt.format(addr) for addr in data.stacktrace if addr != 0 ])
+                    click.echo(f'\tStacktrace: { fmted_trace }')
                 # if the interrupt was asynchrounous, read the saved registers
                 if data.interrupt_type != 0:
                     hexfmt = '{:#010x}'
@@ -247,14 +254,7 @@ def recover(force, bossac_path, elf_path, bin_path, port):
                     click.echo(f'\t\t{ fmted_regs_line2 }\t')
                     # print the special ones
                     click.echo(f'\t\tSP: { hexfmt.format(data.regs[13]) }\tLR: { hexfmt.format(data.regs[14]) }\tPC: { hexfmt.format(data.regs[15]) }\txPSR: { hexfmt.format(data.xpsr) }')
-                # print decoded stacktrace if all tools needed are present
-                if elf_path != None and os.path.isfile(elf_path):
-                    click.echo('\tDecoded Stacktrace (may take a moment): ')
-                    print_stack_trace(elf_path, [ addr for addr in data.stacktrace if addr != 0 ])
-                # else print the normal stacktrace
-                else:
-                    fmted_trace = ', '.join([ hexfmt.format(addr) for addr in data.stacktrace if addr != 0 ])
-                    click.echo(f'\tStacktrace: { fmted_trace }')
+                click.echo(f'\tFailures since upload: { data.failnum }')
                 # exit success
                 exit_status = 0
                 break

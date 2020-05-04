@@ -1,5 +1,5 @@
 # 📜FeatherTrace
-When a microcontroller crashes or hangs, it can be quite difficult to troubleshoot what caused it. FeatherTrace is an attempt to build a system that can not only recover from a crash, but explain why the crash happened. FeatherFault supports all boards using the SAMD21 (Adafruit Feather M0, Arduino Zero, etc.), and future support is planned for the SAMD51. 
+When a microcontroller crashes or hangs, it can be quite difficult to troubleshoot what caused it. FeatherTrace is an attempt to build a system that can not only recover from a crash, but explain why the crash happened. FeatherFault supports all boards using the SAMD21 (Adafruit Feather M0, Arduino Zero, etc.), and future support is planned for the SAMD51.
 
 FeatherTrace is an alternative to [FeatherFault](https://github.com/OPEnSLab-OSU/FeatherFault) for advanced users. FeatherTrace requires modifications to the compilation flags of your project to function, making it incompatible with the Arduino IDE and library manager. These modifications, however, allow FeatherTrace to offer a complete stacktrace and register dump on top of FeatherFault's existing features.
 
@@ -23,8 +23,8 @@ Using the ArduinoCLI you can add the following option to your `compile` command:
 ```
 To break these flags down:
  * `-ggdb3 -g3` - Ensure there is debugging information in the `.elf` file. More information on how these flags work [here](https://eli.thegreenplace.net/2011/02/07/how-debuggers-work-part-3-debugging-information).
- * `-fasynchronous-unwind-tables` - A GCC specific flag to enable unwinding tables. With this flag GCC will generate static tables that allow an executing program to determine all functions called before it during a given execution. This feature would normally be used to unwind the stack after an exception, however FeatherTrace hijacks it to determine where the program was when a fault occurred. This [StackOverflow post](https://stackoverflow.com/questions/53102185/what-exactly-happens-when-compiling-with-funwind-tables) goes into more depth.
- * `-Wl,--no-merge-exidx-entries` - A suggestion from this [StackOverflow post](https://stackoverflow.com/a/6947164) to prevent unnecessary optimization. I have no idea what this does, but it doesn't seem to cause any issues.
+ * `-fasynchronous-unwind-tables` - A GCC specific flag to enable unwinding tables. With this flag GCC will generate static tables that allow an executing program to determine all functions called before it during a given execution. This feature would normally be used to unwind the stack after an exception, however FeatherTrace hijacks it to determine where the program was when a fault occurred. This [StackOverflow post](https://stackoverflow.com/questions/53102185/what-exactly-happens-when-compiling-with-funwind-tables) goes into more depth on the functionality of this flag.
+ * `-Wl,--no-merge-exidx-entries` - A suggestion from this [StackOverflow post](https://stackoverflow.com/a/6947164) to prevent dangerous optimizations. I have no idea what this does, but it doesn't seem to cause any issues.
 
 ### Using FeatherTrace
 
@@ -84,21 +84,21 @@ void setup() {
     Serial.println("Done!");
 }
 ```
-If we run this code without FeatherFault, we would see the serial monitor output something like this:
+If we run this code without FeatherTrace, we would see the serial monitor output something like this:
 ```
 Start!
 ```
 After which the device hard faults, causing it to wait in an infinite loop until it is reset. 
 
-This behavior is extremely difficult to troubleshoot: as the developer, all we know is that the device failed between `Start!` and `Done`. Using more print statements, we could eventually narrow down the cause to `unsafe_function`—this process is time consuming, unreliable, and downright annoying. Instead, let's try the same code with FeatherFault activated:
+This behavior is extremely difficult to troubleshoot: as the developer, all we know is that the device failed between `Start!` and `Done`. Using more print statements, we could eventually narrow down the cause to `unsafe_function`—this process is time consuming, unreliable, and downright annoying. Instead, let's try the same code with FeatherTrace activated:
 ```C++
 void setup() {
     // Wait for serial to connect to the serial monitor
     Serial.begin(...);
     while(Serial);
-    // Activate FeatherFault
-    FeatherFault::PrintFault(Serial);
-    FeatherFault::StartWDT(FeatherFault::WDTTimeout::WDT_8S);
+    // Activate FeatherTrace
+    FeatherTrace::PrintFault(Serial);
+    FeatherTrace::StartWDT(FeatherTrace::WDTTimeout::WDT_8S);
     // begin code
     MARK;
     Serial.println("Start!");
@@ -118,20 +118,67 @@ Running that sketch, we would see the following serial monitor output:
 No fault
 Start!
 ```
-`No fault` here indicates that FeatherFault has not been triggered yet. We change that shortly by running `unsafe_function()`, causing a hard fault. Instead of waiting in an infinite loop, however, the board is immediately reset to the start of the sketch by FeatherFault. We can then open the serial monitor again:
+`No fault` here indicates that FeatherFault has not been triggered yet. We change that shortly by running `unsafe_function()`, causing a hard fault. Instead of waiting in an infinite loop, however, the board is immediately reset to the start of the sketch by FeatherTrace. We can then open the serial monitor again:
 ```
 Fault! Cause: HARDFAULT
 Fault during recording: No
-Line: 18
-File: MySketch.ino
+Line: 11
+File: main.cpp
+Interrupt type: 3
+Stacktrace: 0x00002182, 0x0000219a, 0x000021f2, 0x00003bc6
+Registers:
+        R0: 0x000007d0  R1: 0x00006374  R2: 0x41004400  R3: 0x000007cf  R4: 0x00017675  R5: 0x0000000d  R6: 0x20000240
+        R7: 0x20000224  R8: 0xcffdbfd6  R9: 0xffffff7b  R10: 0xffffffff R11: 0xf9ffffdf R12: 0x20000760 SP: 0x20007fc8
+        LR: 0x00002171  PC: 0x00002182  xPSR: 0x21000000
 Failures since upload: 1
-Start!
 ```
-Since the FeatherFault was triggered by the hard fault, `FeatherFault::PrintFault` will print the last file and line number `MARK`ed before the hard fault happened. In this case, line 18 of `MySketch.ino` indicates the `MARK` statement after `other_function_one()`, leading us to suspect that `unsafe_function()` is causing the issue. We can now focus on troubleshooting `unsafe_function()`.
+Since the FeatherTrace was triggered by the hard fault, `FeatherTrace::PrintFault` will print the last file and line number `MARK`ed before the hard fault happened. In this case, line 18 of `MySketch.ino` indicates the `MARK` statement after `other_function_one()`, leading us to suspect that `unsafe_function()` is causing the issue. We can now focus on troubleshooting `unsafe_function()`.
+
+#### FeatherTrace Additions
+
+In addition to line/file information, FeatherTrace will also print out a captured interrupt type, stacktrace, and register dump, allowing the developer to infer the exact state of the CPU during the fault. This information can be very useful when debugging a fault in a library or system function. For example, suppose `MyLibrary` is an external dependency which cannot be modified, or is so large `MARK`ing every line becomes impractical:
+```C++
+void setup() {
+    MARK;
+    MyLibrary.dosomething();
+    MARK;
+}
+
+void MyLibrary::dosomething() {
+    // 500+ lines of uncommented code
+    unsafe_function(); // do something faulty
+    // another 500+ lines of uncommented code
+}
+```
+Running that sketch would generate the following output:
+```
+Fault! Cause: HARDFAULT
+Fault during recording: No
+Line: 5
+File: main.cpp
+Interrupt type: 3
+Stacktrace: 0x00002182, 0x0000219a, 0x000021f2, 0x00003bc6
+Registers:
+        R0: 0x000007d0  R1: 0x00006374  R2: 0x41004400  R3: 0x000007cf  R4: 0x00017675  R5: 0x0000000d  R6: 0x20000240
+        R7: 0x20000224  R8: 0xcffdbfd6  R9: 0xffffff7b  R10: 0xffffffff R11: 0xf9ffffdf R12: 0x20000760 SP: 0x20007fc8
+        LR: 0x00002171  PC: 0x00002182  xPSR: 0x21000000
+Failures since upload: 1
+```
+In this case, the line and file number point to the `MARK` statement just above `MyLibrary.dosomething()`, indicating the fault could be anywhere inside that function. As `MyLibrary::dosomething` is easily 1000+ lines, `MARK`ing the entire body is a less than ideal approach. Instead, FeatherTrace outputs a stacktrace we can use to recover line/file information in files even where `MARK` is not present. This information must be decoded using an external script, and instructions on this can be found in TODO. In this example, decoding the stacktrace results in the following output:
+```
+Decoded Stacktrace:
+    0x00002182: unsafe_function() at src/MyLibrary.cpp:10        
+    0x0000219a: MyLibrary::dosomething() at src/MyLibrary.cpp:18
+    0x000021f2: setup() at src/main.cpp:36
+    0x00003bc6: main() at .../framework-arduino-samd-adafruit/cores/arduino/main.cpp:50
+```
+Using this information we see that the project faulted at `unsafe_function:10`, and can now focus on troubleshooting.
 
 ## Additional Features TODO
 
 ## Implementation Notes TODO
+
+SAVE YOUR ELF FILES
 
 ### Stack Tracing
 
