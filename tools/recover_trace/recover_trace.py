@@ -28,6 +28,7 @@ import array
 from collections import namedtuple
 import os
 import shutil
+import re
 from elftools.elf.elffile import ELFFile
 from pyocd.debug.elf.decoder import DwarfAddressDecoder
 
@@ -90,25 +91,25 @@ def get_fault_data(byte_data):
     true_unpacked = unpacked[:8] + (stacktrace, unpacked[40], regs) + unpacked[57:]
     return FEATHERTRACE_STRUCT_NAMEDTUPLE._make(true_unpacked)
 
-def print_stack_trace(elf_path, addresses):
+def print_stack_trace(elf_path, addresses, indent):
     try:
-        with open(elf_path, 'rb') as e:
-            elffile = ELFFile(e)
-            decoder = DwarfAddressDecoder(elffile)
-            for addr in addresses:
-                # for some reason the stack trace is off by one?
-                # I correct it here instead of inside FeatherTrace because
-                # the addresses are correct during the GDB session
-                # when they are being saved. Not sure why.
-                function = decoder.get_function_for_address(addr - 1)
-                line = decoder.get_line_for_address(addr - 1)
-                click.echo(f'\t\t{ format(addr, "#010x") }: { function.name.decode() }() at { line.dirname.decode() }/{ line.filename.decode() }:{ line.line }')
+        elffile = ELFFile(elf_path)
+        decoder = DwarfAddressDecoder(elffile)
+        for addr in addresses:
+            function = decoder.get_function_for_address(addr)
+            line = decoder.get_line_for_address(addr)
+            indent_str = ''.join(['\t' for x in range(indent)])
+            funcname = function.name.decode() if function is not None else 'unknown'
+            dirname = line.dirname.decode() if line is not None else 'unknown'
+            filename = line.filename.decode() if line is not None else 'unknown'
+            linenum = line.line if line is not None else 'unknown'
+            click.echo(f'{ indent_str }{ format(addr, "#010x") }: { funcname }() at { dirname }/{ filename }:{ linenum }')
     except Exception as ex:
         click.echo(f'Error while decoding stacktrace: {ex}')
 
 # Click setup and commands:
 @click.group()
-def recover_fault():
+def recover_trace():
     """FeatherTrace Trace Data Recovery Tool.
     
     Extracts FeatherTrace trace data from an otherwise unavailable board. Requires
@@ -116,7 +117,7 @@ def recover_fault():
     """
     pass
 
-@recover_fault.command(short_help='Attempt to reset a board into bootloader mode using a Serial connection')
+@recover_trace.command(short_help='Attempt to reset a board into bootloader mode using a Serial connection')
 @click.option('--attempt-count', '-a', default=10, show_default=True,
     help='Number of times to retry resetting the device',) 
 @click.option('--attempt-wait', '-w', default=1000, show_default=True,
@@ -172,12 +173,12 @@ def reset_board(attempt_count, attempt_wait, force, port):
     click.echo('Board failed to reset!', err=True)
     exit(1)
 
-@recover_fault.command(short_help='Extract FeatherTrace trace data from a Feather M0 in bootloader mode')
+@recover_trace.command(short_help='Extract FeatherTrace trace data from a Feather M0 in bootloader mode')
 @click.option('--force', '-f', is_flag=True,
     help='Disable all checks that the COM port is valid (not recommended)') 
 @click.option('--bossac-path', '-u', type=click.Path(dir_okay=False), default=None,
     help='Location of the BOSSAC uploader tool, see installation instructions for more information. If this option is not specified BOSSAC must be in your PATH.')
-@click.option('--elf-path', '-e', type=click.Path(dir_okay=False), default=None,
+@click.option('--elf-path', '-e', type=click.File(mode='rb'), default=None,
     help='Location of the ELF file for addr2line to interpret debug symbols from. Must be from the same build as is running on the Feather M0 for stacktrace decoding to work correctly.')
 @click.option('--bin-path', '-b', type=click.Path(dir_okay=False), default='./flash.bin',
     help='Location to place temporarily place the flash data')
@@ -235,16 +236,16 @@ def recover(force, bossac_path, elf_path, bin_path, port):
                 click.echo(f'\tLast Marked File: { data.file.split(bytes.fromhex("00"), 1)[0] }')
                 click.echo(f'\tInterrupt type: { data.interrupt_type }')
                 # print decoded stacktrace if all tools needed are present
-                if elf_path != None and os.path.isfile(elf_path):
+                hexfmt = '{:#010x}'
+                if elf_path != None:
                     click.echo('\tDecoded Stacktrace (may take a moment): ')
-                    print_stack_trace(elf_path, [ addr for addr in data.stacktrace if addr != 0 ])
+                    print_stack_trace(elf_path, [ addr for addr in data.stacktrace if addr != 0 ], 2)
                 # else print the normal stacktrace
                 else:
                     fmted_trace = ', '.join([ hexfmt.format(addr) for addr in data.stacktrace if addr != 0 ])
                     click.echo(f'\tStacktrace: { fmted_trace }')
                 # if the interrupt was asynchrounous, read the saved registers
                 if data.interrupt_type != 0:
-                    hexfmt = '{:#010x}'
                     click.echo('\tRegisters:')
                     # print the first 13 registers
                     first_regs = [ 'R{:} {:#010x}'.format(i, regval) for i,regval in enumerate(data.regs[:13]) ]
@@ -264,7 +265,34 @@ def recover(force, bossac_path, elf_path, bin_path, port):
     os.remove(bin_path)
     exit(exit_status)
 
-# TODO: "decode" command to decode stacktrace addresses
+@recover_trace.command(short_help='Decodes stacktrace addresses into line/fine information')
+@click.option('--elf-path', '-e', type=click.File(mode='rb'), required=True,
+    help='Location of the ELF file for addr2line to interpret debug symbols from. Must be from the same build as is running on the Feather M0 for stacktrace decoding to work correctly.')
+@click.argument('stacktrace', nargs=-1)
+def decode(elf_path, stacktrace):
+    """
+    Decode a stacktrace outputted from FeatherTrace into line/file information. Requires
+    the ELF file from the exact build currently running on the device being debugged,
+    otherwise the output will be innaccurate.
+
+    Stacktrace values must be hexidecimal and space seperated, but may also contain commas and
+    prefixes.
+    """
+    if stacktrace is None or len(stacktrace) == 0:
+        exit(0)
+    # parse the stacktrace, spliting it into hex numbers
+    STACKTRACE_FMT = r'^[,\s]{0,2}(?:0x)?([0-9A-Fa-f]{1,8})[,\s]{0,2}$'
+    stripped_addrs = []
+    for addr in stacktrace:
+        match = re.match(STACKTRACE_FMT, addr)
+        if match is None:
+            click.echo(f'Discarding invalid address { addr }')
+        else:
+            stripped_addrs.append(int(match.string[match.regs[1][0]:match.regs[1][1]], 16))
+    # decode and print information!
+    click.echo('Decoded stacktrace (may take a moment):')
+    print_stack_trace(elf_path, stripped_addrs, 1)
+    exit(0)
 
 if __name__ == '__main__':
-    recover_fault()
+    recover_trace()

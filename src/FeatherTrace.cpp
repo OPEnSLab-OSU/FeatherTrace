@@ -150,7 +150,12 @@ static void fill_phase2_vrs(volatile unsigned *fault_args)
 _Unwind_Reason_Code trace_func(struct _Unwind_Context *context, void *arg)
 {
     trace_arg_t* myargs = (trace_arg_t*)arg;
+    // for some reason IP's are always one above the values used by
+    // addr2line and other tools. To correct for this, we subtract
+    // 1 here.
     unsigned ip = _Unwind_GetIP(context);
+    if (ip > 0)
+        ip--;
     // ignore the first entry to prevent doubling up
     if (myargs->strace_len == 0)
     {
@@ -225,7 +230,7 @@ static void take_isr_cpu_trace(trace_arg_t* arg)
     }
     if (arg->strace_len == 1)
     {
-        arg->stacktrace[1] = saved_lr;
+        arg->stacktrace[1] = saved_lr - 1;
         arg->strace_len++;
     }
 }
@@ -274,7 +279,7 @@ static void write_to_flash(const FaultDataFlash_t& trace) {
 }
 
 /* See FeatherTrace.h */
-[[noreturn]] void FeatherTrace::Fault(FeatherTrace::FaultCause cause) {
+void FeatherTrace::Fault(FeatherTrace::FaultCause cause) {
     // Check if the the interrupt was a WDT EW
     // Read SCB/ICSR, detailed here:
     // https://developer.arm.com/docs/dui0662/a/cortex-m0-peripherals/system-control-block/interrupt-control-and-state-register

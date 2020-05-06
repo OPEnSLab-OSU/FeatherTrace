@@ -156,9 +156,10 @@ namespace FeatherTrace {
      * @note when calling this function in your code you should 
      * use FaultCause::FAULT_USER.
      * @note Do not call this function in an interrupt context.
+     * @note This function will not return.
      * @param cause Cause of the fault for FeatherTrace to save.
      */
-    [[noreturn]] void Fault(FaultCause cause);
+    void Fault(FaultCause cause);
 
     /** Private utility function called by the MARK macro */
     void _Mark(const int line, const char* file);
