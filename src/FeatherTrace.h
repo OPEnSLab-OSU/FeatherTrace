@@ -162,7 +162,7 @@ namespace FeatherTrace {
     void Fault(FaultCause cause);
 
     /** Private utility function called by the MARK macro */
-    void _Mark(const int line, const char* file);
+    void mark(const int line = __builtin_LINE(), const char* file = _ShortFilePrivate::past_last_slash(__builtin_FILE()));
 }
 
 /** 
@@ -183,7 +183,7 @@ namespace FeatherTrace {
  * This macro is a proxy for FeatherTrace::_Mark, allowing it to 
  * grab the line # and filename.
  */
-#define MARK { constexpr const char* const filename = __SHORT_FILE__; FeatherTrace::_Mark(__LINE__,  filename); }
+#define MARK { FeatherTrace::mark(); }
 
 /// This struct definition mimics the internal structures of libgcc in
 /// arm-none-eabi binary. It's not portable and might break in the future.

@@ -435,7 +435,7 @@ void FeatherTrace::SetCallback(volatile void(*callback)()) {
 }
 
 /* See FeatherTrace.h */
-void FeatherTrace::_Mark(const int line, const char* file) {
+void FeatherTrace::mark(const int line, const char* file) {
     // feed the watchdog
     should_feed_watchdog.store(true);
     // write the last marked data
