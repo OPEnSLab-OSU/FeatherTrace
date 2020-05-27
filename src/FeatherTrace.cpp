@@ -456,7 +456,7 @@ void FeatherTrace::PrintFault(Print& where) {
     // print it the printer
     if (trace->data.cause != FeatherTrace::FAULT_NONE) {
         where.print("Fault! Cause: ");
-        where.println(FeatherTrace::GetCauseString(trace->data.cause));
+        where.println(FeatherTrace::GetCauseString(static_cast<FeatherTrace::FaultCause>(trace->data.cause)));
         where.print("Fault during recording: ");
         where.println(trace->data.is_corrupted ? "Yes" : "No");
         where.print("Line: ");
