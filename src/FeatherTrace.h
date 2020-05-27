@@ -145,6 +145,14 @@ namespace FeatherTrace {
     FaultData GetFault();
 
     /**
+     * Returns the string representation of the appropriete fault cause,
+     * useful for printing the fault to serial.
+     * @param cause The fault cause to get the string for.
+     * @return A static string indicating the fault cause name, "Corrupted" if invalid.
+     */
+    const char* GetCauseString(const FaultCause cause);
+
+    /**
      * Immediately triggers a fault with a user-specified cause.
      * This function is a manual method for triggering FeatherTrace,
      * and can be used as a last-resort panic handler in code. When

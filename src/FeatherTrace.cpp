@@ -456,15 +456,7 @@ void FeatherTrace::PrintFault(Print& where) {
     // print it the printer
     if (trace->data.cause != FeatherTrace::FAULT_NONE) {
         where.print("Fault! Cause: ");
-        switch (trace->data.cause) {
-            case FeatherTrace::FAULT_UNKNOWN: where.println("UKNOWN"); break;
-            case FeatherTrace::FAULT_HUNG: where.println("HUNG"); break;
-            case FeatherTrace::FAULT_HARDFAULT: where.println("HARDFAULT"); break;
-            case FeatherTrace::FAULT_OUTOFMEMORY: where.println("OUTOFMEMORY"); break;
-            case FeatherTrace::FAULT_USER: where.println("USER"); break;
-            default: where.println("Corrupted");
-        }
-        
+        where.println(FeatherTrace::GetCauseString(trace->data.cause));
         where.print("Fault during recording: ");
         where.println(trace->data.is_corrupted ? "Yes" : "No");
         where.print("Line: ");
@@ -534,4 +526,15 @@ FeatherTrace::FaultData FeatherTrace::GetFault() {
     for(size_t i = 0; i < sizeof(ret.file); i++)
         ret.file[i] = trace->data.file[i];
     return ret;
+}
+
+const char* FeatherTrace::GetCauseString(const FaultCause cause) {
+    switch (cause) {
+        case FeatherTrace::FAULT_UNKNOWN: return "UNKNOWN";
+        case FeatherTrace::FAULT_HUNG: return "HUNG";
+        case FeatherTrace::FAULT_HARDFAULT: return "HARDFAULT";
+        case FeatherTrace::FAULT_OUTOFMEMORY: return "OUTOFMEMORY";
+        case FeatherTrace::FAULT_USER: return "USER";
+        default: return "Corrupted";
+    }
 }
