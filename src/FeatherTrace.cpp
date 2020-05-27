@@ -150,12 +150,14 @@ static void fill_phase2_vrs(volatile unsigned *fault_args)
 _Unwind_Reason_Code trace_func(struct _Unwind_Context *context, void *arg)
 {
     trace_arg_t* myargs = (trace_arg_t*)arg;
-    // for some reason IP's are always one above the values used by
-    // addr2line and other tools. To correct for this, we subtract
-    // 1 here.
+    // for some reason IP's are sometimes one below the values used by
+    // addr2line and other tools. This only happens if the address is odd,
+    // so I suspect this is due to PC getting incremented and then faulting
+    // before it is incremented again. To correct for this, we add
+    // 1 here if the number is odd.
     unsigned ip = _Unwind_GetIP(context);
-    if (ip > 0)
-        ip--;
+    if (ip > 0 && ip & 1)
+        ip++;
     // ignore the first entry to prevent doubling up
     if (myargs->strace_len == 0)
     {
